@@ -60,6 +60,8 @@ class ProbShieldWrapperBase(ConstraintPersistentWrapper):
         theta: float = 1e-10,
         max_vi_steps: int = 1000,
         init_safety_bound: float = 0.5,
+        max_episode_steps: Optional[int] = None,
+        n_margin_buckets: int = 5,
     ):
         super().__init__(env)
 
@@ -68,6 +70,13 @@ class ProbShieldWrapperBase(ConstraintPersistentWrapper):
         self.max_vi_steps = max_vi_steps
         self.init_safety_bound = init_safety_bound
         self._box_dtype = np.float32
+
+        if max_episode_steps is None:
+            self._margin_horizons = [0, 50, 100, 150, 200]
+        else:
+            step = max_episode_steps // n_margin_buckets
+            self._margin_horizons = [k * step for k in range(n_margin_buckets)]
+        self._margin_horizon_set = set(self._margin_horizons)
 
         # Sanity checks
         if is_wrapped(self.env, ProbShieldWrapperBase):
@@ -123,6 +132,8 @@ class ProbShieldWrapperBase(ConstraintPersistentWrapper):
 
         self.observation_space = self._make_augmented_obs_space(self._orig_obs_space)
         self.action_space = self._make_augmented_act_space(self._orig_act_space)
+
+        self.t = 0
 
     def _abstraction(self, obs: Any) -> int:
         if isinstance(self._orig_obs_space, spaces.Discrete):
@@ -325,10 +336,10 @@ class ProbShieldWrapperBase(ConstraintPersistentWrapper):
         return pi.astype(np.float64), proj_safety_bounds_full
 
     def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
-        super().reset(seed=seed)
         obs, info = self.env.reset(seed=seed, options=options)
         self._current_safety_bound = float(self.init_safety_bound)
         self._current_obs = self._abstraction(obs)
+        self.t = 0
         return self._augment_obs(obs), info
 
     def step(self, action):
@@ -359,6 +370,12 @@ class ProbShieldWrapperBase(ConstraintPersistentWrapper):
         self._current_safety_bound = proj_safety_bounds_full[next_obs_idx]
         self._current_obs = abstr_obs
 
+        info["margin_sample"] = float(self._current_safety_bound)
+        if self.t in self._margin_horizon_set:
+            info.update({f"margin_{self.t}": self._current_safety_bound})
+
+        self.t += 1
+
         return self._augment_obs(orig_obs), reward, terminated, truncated, info
 
 class ProbShieldWrapperDisc(ProbShieldWrapperBase):
@@ -373,6 +390,8 @@ class ProbShieldWrapperDisc(ProbShieldWrapperBase):
         max_vi_steps: int = 1000,
         init_safety_bound: float = 0.5,
         granularity: int = 20,
+        max_episode_steps: Optional[int] = None,
+        n_margin_buckets: int = 5,
     ):
 
         self.granularity = granularity
@@ -384,7 +403,9 @@ class ProbShieldWrapperDisc(ProbShieldWrapperBase):
             safety_abstraction=safety_abstraction, 
             theta=theta, 
             max_vi_steps=max_vi_steps, 
-            init_safety_bound=init_safety_bound
+            init_safety_bound=init_safety_bound,
+            max_episode_steps=max_episode_steps,
+            n_margin_buckets=n_margin_buckets,
         )
 
     def _make_augmented_act_space(self, orig: spaces.Discrete) -> spaces.MultiDiscrete:
@@ -408,6 +429,8 @@ class ProbShieldWrapperCont(ProbShieldWrapperBase):
         theta: float = 1e-10,
         max_vi_steps: int = 1000,
         init_safety_bound: float = 0.5,
+        max_episode_steps: Optional[int] = None,
+        n_margin_buckets: int = 5,
     ):
 
         super().__init__(
@@ -417,7 +440,9 @@ class ProbShieldWrapperCont(ProbShieldWrapperBase):
             safety_abstraction=safety_abstraction, 
             theta=theta, 
             max_vi_steps=max_vi_steps, 
-            init_safety_bound=init_safety_bound
+            init_safety_bound=init_safety_bound,
+            max_episode_steps=max_episode_steps,
+            n_margin_buckets=n_margin_buckets,
         )
 
     def _make_augmented_act_space(self, orig: spaces.Discrete) -> spaces.Dict:

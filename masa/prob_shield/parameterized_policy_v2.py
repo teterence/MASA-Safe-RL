@@ -31,6 +31,10 @@ class ParamActionDist:
     mix_scale_table: jnp.ndarray  # (B, N, N, E, 1)
     eps: float = 1e-6
 
+    def _safe_mix(self, mix: jnp.ndarray) -> jnp.ndarray:
+        safe_eps = jnp.array(self.eps * 2, dtype=mix.dtype)
+        return jnp.clip(mix, safe_eps, 1.0 - safe_eps)
+
     def _gather_mix_params(self, i: jnp.ndarray, j: jnp.ndarray):
         """
         i, j, e: (B,) int32
@@ -77,20 +81,17 @@ class ParamActionDist:
     def mode(self):
         i = jnp.argmax(self.logits_i, axis=1)
         j = jnp.argmax(self.logits_j, axis=1)
-        
+
         # use mean of sigmoid-normal approximately via loc (not exact); ok for deterministic eval
         loc, _ = self._gather_mix_params(i, j)
-        margin = jnp.array(self.eps*2, dtype=loc.dtype)
-        mix = jnp.clip(jax.nn.sigmoid(loc), margin, 1.0 - margin)
+        mix = self._safe_mix(jax.nn.sigmoid(loc))
         return jnp.concatenate([i[:, None], j[:, None], mix], axis=1)
 
     def log_prob(self, actions):
         # actions shape (B, 2+K), first two are i,j (possibly floats)
         i = actions[:, 0].astype(jnp.int32)
         j = actions[:, 1].astype(jnp.int32)
-        mix = actions[:, 2].reshape((-1, 1)).astype(self.mix_loc_table.dtype)  # (B,1)
-        margin = jnp.array(self.eps*2, dtype=self.mix_loc_table.dtype)
-        mix = jnp.clip(mix, margin, 1.0 - margin) # guard against nans
+        mix = self._safe_mix(actions[:, 2].reshape((-1, 1)).astype(self.mix_loc_table.dtype))
 
         di = tfd.Categorical(logits=self.logits_i)
         dj = tfd.Categorical(logits=self.logits_j)
@@ -108,9 +109,7 @@ class ParamActionDist:
 
         i = actions[:, 0].astype(jnp.int32)
         j = actions[:, 1].astype(jnp.int32)
-        mix = actions[:, 2].reshape((-1, 1)).astype(self.mix_loc_table.dtype)
-        margin = jnp.array(self.eps*2, dtype=self.mix_loc_table.dtype)
-        mix = jnp.clip(mix, margin, 1.0 - margin) # guard against nans
+        mix = self._safe_mix(actions[:, 2].reshape((-1, 1)).astype(self.mix_loc_table.dtype))
         mix_ent_approx = -self._mix_dist(i, j).log_prob(mix)
 
         return ent + mix_ent_approx
@@ -138,19 +137,20 @@ class ActionDist:
         mix = self._mix_dist().sample(seed=key_m)   # (B, 1)
         return jnp.concatenate([i[:, None], j[:, None], mix], axis=1)
 
+    def _safe_mix(self, mix: jnp.ndarray) -> jnp.ndarray:
+        safe_eps = jnp.array(self.eps * 2, dtype=mix.dtype)
+        return jnp.clip(mix, safe_eps, 1.0 - safe_eps)
+
     def mode(self):
         i = jnp.argmax(self.logits_i, axis=1)
         j = jnp.argmax(self.logits_j, axis=1)
-        margin = jnp.array(self.eps*2, dtype=self.loc.dtype)
-        mix = jnp.clip(jax.nn.sigmoid(self.loc), margin, 1.0 - margin)
+        mix = self._safe_mix(jax.nn.sigmoid(self.loc))
         return jnp.concatenate([i[:, None], j[:, None], mix], axis=1)
 
     def log_prob(self, actions):
         i = actions[:, 0].astype(jnp.int32)
         j = actions[:, 1].astype(jnp.int32)
-        mix = actions[:, 2].reshape((-1, 1)).astype(self.loc.dtype)
-        margin = jnp.array(self.eps*2, dtype=self.loc.dtype)
-        mix = jnp.clip(mix, margin, 1.0 - margin) # guard against nans
+        mix = self._safe_mix(actions[:, 2].reshape((-1, 1)).astype(self.loc.dtype))
         di = tfd.Categorical(logits=self.logits_i)
         dj = tfd.Categorical(logits=self.logits_j)
         lp = di.log_prob(i) + dj.log_prob(j)
@@ -160,9 +160,7 @@ class ActionDist:
     def entropy(self, actions):
         di = tfd.Categorical(logits=self.logits_i)
         dj = tfd.Categorical(logits=self.logits_j)
-        mix = actions[:, 2].reshape((-1, 1)).astype(self.loc.dtype)
-        margin = jnp.array(self.eps*2, dtype=self.loc.dtype)
-        mix = jnp.clip(mix, margin, 1.0 - margin) # guard against nans
+        mix = self._safe_mix(actions[:, 2].reshape((-1, 1)).astype(self.loc.dtype))
         mix_ent_approx = -self._mix_dist().log_prob(mix)
         return di.entropy() + dj.entropy() + mix_ent_approx
 
@@ -176,7 +174,7 @@ class ParameterizedActorV2(nn.Module):
     embed_dim: int = 64
     log_std_init: float = 0.0
     log_std_min: float = -5.0
-    log_std_max: float = 1.0
+    log_std_max: float = 2.0
     eps: float = 1e-6
     mean_clip: Optional[float] = 10.0
     smooth_mean_clip: bool = True
@@ -198,7 +196,6 @@ class ParameterizedActorV2(nn.Module):
                 loc = self.mean_clip * jnp.tanh(loc)
             else:
                 loc = jnp.clip(loc, -self.mean_clip, self.mean_clip)
-
         log_scale = nn.Dense(1)(x) + self.log_std_init
         log_scale = jnp.clip(log_scale, self.log_std_min, self.log_std_max)
         scale = jnp.exp(log_scale) + self.eps
@@ -272,7 +269,7 @@ class ParameterizedPPOPolicyV2(BaseJaxPolicy):
         optimizer_kwargs: Optional[dict[str, Any]] = None,
         actor_class: type[nn.Module] = ParameterizedActorV2,
         critic_class: type[nn.Module] = Critic,
-        
+
     ):
         super().__init__(observation_space, action_space)
 
@@ -360,7 +357,7 @@ class ParameterizedPPOPolicyV2(BaseJaxPolicy):
         )
 
         self.critic = self.critic_class(
-            net_arch=self.critic_net_arch, 
+            net_arch=self.critic_net_arch,
             activation_fn=self.activation_fn
         )
 
@@ -380,7 +377,7 @@ class ParameterizedPPOPolicyV2(BaseJaxPolicy):
 
     def reset_noise(self):
         self.key, self.noise_key = jax.random.split(self.key)
- 
+
     def forward(self, key: jax.Array, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         return self._predict(key, obs, deterministic=deterministic)
 
@@ -412,7 +409,7 @@ class ParameterizedPPOPolicyV2(BaseJaxPolicy):
     ) -> jnp.ndarray:
         feats = featurizer_state.apply_fn(featurizer_state.params, obs)
         return actor_state.apply_fn(actor_state.params, feats).mode()
-        
+
     @staticmethod
     @jit
     def sample_action(

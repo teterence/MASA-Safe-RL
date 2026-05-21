@@ -15,13 +15,26 @@ from masa.algorithms.on_policy import PPO
 from masa.common.base_class import BaseJaxPolicy
 from masa.prob_shield.parameterized_policy_v2 import ParameterizedPPOPolicyV2
 from masa.common.metrics import Stats, Dist
+from masa.common.utils import find_margin_horizons
 
 from tqdm.auto import tqdm
+
 
 class ParameterizedPPOV2(PPO):
 
     def __init__(self, *args, policy_class: type[BaseJaxPolicy] = ParameterizedPPOPolicyV2, **kwargs):
         super().__init__(*args, policy_class=policy_class, **kwargs)
+
+        self._margin_horizons = find_margin_horizons(self.env.envs[0])
+        self.margin_dists = {f"margin_{t}": Dist(prefix=f"margin_{t}") for t in self._margin_horizons}
+
+    def _on_rollout_info(self, info: dict, logger=None):
+        if logger:
+            logger.add("train/stats", {k: v for k, v in info.items() if k in ["margin_penalty", "proj_penalty"]})
+        for t in self._margin_horizons:
+            key = f"margin_{t}"
+            if key in info:
+                self.margin_dists[key].update(info[key])
 
     def _validate_and_extract_action_specs(self):
 
@@ -222,6 +235,7 @@ class ParameterizedPPOV2(PPO):
                 "clip_range": float(clip_range),
                 "lr": float(current_lr)
             })
+            logger.add("train/stats", {k: v for k, v in self.margin_dists.items() if v.n != 0})
 
     def prepare_act(self, act: Any, n_envs: int = 1) -> np.ndarray:
 

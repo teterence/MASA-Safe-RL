@@ -1,5 +1,5 @@
 from __future__ import annotations
-from contextlib import contextmanager
+from contextlib import nullcontext
 import jax.random as jr
 import jax.numpy as jnp
 from abc import ABC
@@ -18,16 +18,20 @@ from masa.common.buffers import RolloutBuffer
 from masa.common.policies import PPOPolicy
 from tqdm.auto import tqdm
 
-@contextmanager
-def nullcontext(arg=None):
-    yield arg
-
 class OnPolicyAlgorithm(BaseAlgorithm, ABC):
 
     def __init__(
         self,
         env: gym.Env,
-        *args,
+        tensorboard_logdir: Optional[str] = None,
+        wandb_project: Optional[str] = None, # W&B project name (enables W&B if set)
+        wandb_name: Optional[str] = None, # Specific name for this W&B run
+        seed: Optional[int] = None,
+        monitor: bool = True,
+        device: str = "auto",
+        verbose: int = 0,
+        env_fn: Optional[Callable[[], gym.Env]] = None,
+        eval_env: Optional[gym.Env] = None,
         use_tqdm_rollout: bool = False,
         learning_rate: Union[float, optax.Schedule] = 3e-4,
         n_steps: int = 16,
@@ -38,12 +42,24 @@ class OnPolicyAlgorithm(BaseAlgorithm, ABC):
         max_grad_norm: float = 0.5,
         policy_class: type[BaseJaxPolicy] = PPOPolicy,
         policy_kwargs: Optional[dict[str, Any]] = None,
-        **kwargs,
     ):
 
         env = self._wrap_env(env)
 
-        super().__init__(env, *args, **kwargs)
+        super().__init__(
+            env, 
+            tensorboard_logdir=tensorboard_logdir,
+            wandb_project=wandb_project,
+            wandb_name=wandb_name,
+            seed=seed,
+            monitor=monitor,
+            device=device,
+            verbose=verbose,
+            supported_action_spaces=(spaces.Discrete, spaces.Box, spaces.MultiBinary, spaces.MultiDiscrete, spaces.Dict),
+            supported_observation_spaces=(spaces.Box,),
+            env_fn=env_fn,
+            eval_env=eval_env,
+        )
 
         if policy_kwargs is None:
             policy_kwargs = {}
@@ -156,6 +172,18 @@ class OnPolicyAlgorithm(BaseAlgorithm, ABC):
         self._last_episode_start = [True]*self.n_envs
         super().train(*args, **kwargs)
 
+    def _on_rollout_info(self, info: dict, logger=None):
+        """Hook called once per env per rollout step with the step's info dict.
+
+        Subclasses override to aggregate custom per-step signals into state that
+        their own ``optimize()`` can flush (e.g. margin-stat tracking).
+
+        Args:
+            info: The info dict from a single env's step.
+            logger: The current :class:`TrainLogger`, or *None* outside logging.
+        """
+        pass
+
     def rollout(
         self, 
         step: int,
@@ -243,6 +271,7 @@ class OnPolicyAlgorithm(BaseAlgorithm, ABC):
                 if logger:
                     for info in infos:
                         logger.add("train/rollout", info)
+                        self._on_rollout_info(info, logger=logger)
 
         assert isinstance(self._last_obs, np.ndarray) 
         final_obs = self.prepare_obs(self._last_obs, n_envs=self.n_envs)

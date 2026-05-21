@@ -11,15 +11,26 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Any, Optional, TypeVar, Union, Callable
 from masa.common.base_class import BaseJaxPolicy
+from masa.common.metrics import Stats, Dist
 from masa.common.on_policy_algorithm import OnPolicyAlgorithm
 from masa.common.policies import PPOPolicy
+from masa.common.utils import find_margin_horizons
 from tqdm.auto import tqdm
 
 class PPO(OnPolicyAlgorithm):
 
     def __init__(
         self,
-        *args,
+        env: gym.Env,
+        tensorboard_logdir: Optional[str] = None,
+        wandb_project: Optional[str] = None,
+        wandb_name: Optional[str] = None,
+        seed: Optional[int] = None,
+        monitor: bool = True,
+        device: str = "auto",
+        verbose: int = 0,
+        env_fn: Optional[Callable[[], gym.Env]] = None,
+        eval_env: Optional[gym.Env] = None, 
         learning_rate: Union[float, optax.Schedule] = 3e-4,
         n_steps: int = 2048,
         batch_size: int = 64,
@@ -33,11 +44,20 @@ class PPO(OnPolicyAlgorithm):
         max_grad_norm: float = 0.5,
         policy_class: type[BaseJaxPolicy] = PPOPolicy,
         policy_kwargs: Optional[dict[str, Any]] = None,
-        **kwargs
-        
+        track_margin_stats: bool = False,
     ):
+
         super().__init__(
-            *args,
+            env, 
+            tensorboard_logdir=tensorboard_logdir,
+            wandb_project=wandb_project,
+            wandb_name=wandb_name,
+            seed=seed,
+            monitor=monitor,
+            device=device,
+            verbose=verbose,
+            env_fn=env_fn,
+            eval_env=eval_env,
             use_tqdm_rollout=True, # Turn on tqdm progress bar for rollout
             learning_rate=learning_rate,
             n_steps=n_steps,
@@ -47,9 +67,11 @@ class PPO(OnPolicyAlgorithm):
             vf_coef=vf_coef,
             max_grad_norm=max_grad_norm,
             policy_class=policy_class,
-            policy_kwargs=policy_kwargs,
-            **kwargs,
+            policy_kwargs=policy_kwargs
         )
+
+        if normalize_advantage:
+            assert batch_size > 1, "batch_size must be > 1 when normalize_advantage = True"
 
         if isinstance(clip_range, float):
             self.clip_range_schedule = optax.schedules.constant_schedule(clip_range)
@@ -60,6 +82,24 @@ class PPO(OnPolicyAlgorithm):
         self.normalize_advantage = normalize_advantage
         self.batch_size = batch_size
         self.n_epochs = n_epochs
+
+        self.track_margin_stats = track_margin_stats
+        if self.track_margin_stats:
+            self._margin_horizons = find_margin_horizons(self.env.envs[0])
+            self._reset_margin_stats()
+
+    def _reset_margin_stats(self):
+        self.margin_dists = {
+            f"margin_{t}": Dist(prefix=f"margin_{t}") for t in self._margin_horizons
+        }
+
+    def _on_rollout_info(self, info: dict, logger=None):
+        if not self.track_margin_stats:
+            return
+        for t in self._margin_horizons:
+            key = f"margin_{t}"
+            if key in info:
+                self.margin_dists[key].update(info[key])
 
     @staticmethod
     @partial(jit, static_argnames=["normalize_advantage"])
@@ -172,6 +212,9 @@ class PPO(OnPolicyAlgorithm):
                 "clip_range": float(clip_range),
                 "lr": float(current_lr)
             })
+
+        if self.track_margin_stats and logger:
+            logger.add("train/stats", {k: v for k, v in self.margin_dists.items() if v.n != 0})
 
     @property
     def train_ratio(self):

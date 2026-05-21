@@ -231,3 +231,18 @@ def make_marl_env(
             **_resolve_video_kwargs(video_kwargs, record_video_episode_trigger),
         )
     return env
+
+
+MARGIN_STAT_TIMESTEPS = (0, 50, 100, 150, 200)
+
+def find_margin_horizons(env) -> list[int]:
+    """Walk the wrapper chain looking for ``_margin_horizons`` on any layer.
+
+    Returns the first match, or :data:`MARGIN_STAT_TIMESTEPS` as a fallback.
+    """
+    cur = env
+    while cur is not None:
+        if hasattr(cur, "_margin_horizons"):
+            return list(cur._margin_horizons)
+        cur = getattr(cur, "env", None) or getattr(cur, "venv", None)
+    return list(MARGIN_STAT_TIMESTEPS)
